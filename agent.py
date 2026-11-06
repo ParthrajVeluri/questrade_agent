@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-
+import pyttsx3
 from typing import Literal, TypedDict, Optional
 from dotenv import load_dotenv
 from decimal import Decimal
@@ -14,18 +14,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, Field, field_validator
 
 from tools.name_to_ticker import get_ticker_from_name
-
+from helper import debug
+from text_to_speech import TTS
 
 load_dotenv()
 
 
 DEBUG = os.getenv("DEBUG", "true").lower() in {"1", "true", "yes", "on"}
-
-
-def debug(message: str) -> None:
-    if DEBUG:
-        print(f"[DEBUG] {message}")
-
 
 class OrderDraft(BaseModel):
     """Fields extracted from natural-language input."""
@@ -80,7 +75,7 @@ class AgentState(TypedDict, total=False):
 
 
 def build_graph():
-    model_name = os.getenv("OLLAMA_MODEL", "llama3.2")
+    model_name = os.getenv("OLLAMA_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     debug(f"Building graph with model={model_name!r}, base_url={base_url!r}")
     model = ChatOllama(
@@ -365,6 +360,7 @@ def process_command(
 if __name__ == "__main__":
 
     graph = build_graph()
+    tts = TTS()
 
     config = {
         "configurable": {
@@ -397,6 +393,7 @@ if __name__ == "__main__":
             )
 
             print("\n" + result["response"])
+            tts.windows_speak(result["response"])
 
             # If all fields are available, request confirmation
             if result["response"].startswith("Please confirm:"):
@@ -413,6 +410,8 @@ if __name__ == "__main__":
                     )
 
                     print("\n" + result["response"])
+                    tts.windows_speak(result["response"])
+
 
                 elif answer in {"no", "n"}:
 
@@ -428,9 +427,11 @@ if __name__ == "__main__":
                     )
 
                     print("\nOrder cancelled.")
+                    tts.windows_speak("Order cancelled")
 
                 else:
-                    print("\nInvalid confirmation.")
+                    print("\nInvalid confirmation. Please respond with 'yes' or 'no'.")
+                    tts.windows_speak("Invalid confirmation. Please respond with 'yes' or 'no'.s")
 
             debug(
                 f"[main] processing time: "
