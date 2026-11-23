@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from tools.name_to_ticker import get_ticker_from_name
 from helper import debug
-from text_to_speech import TTS
+from tools.text_to_speech import TTS
 
 load_dotenv()
 
