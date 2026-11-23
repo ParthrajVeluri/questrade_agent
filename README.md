@@ -20,6 +20,22 @@ Run the text-input prototype:
 python agent.py
 ```
 
+To use speech input and spoken answers locally:
+
+```bash
+export STT_ENABLED=true
+export TTS_ENABLED=true
+python agent.py
+```
+
+Speech recognition uses Faster Whisper. Optional settings include
+`STT_MODEL_SIZE` (default `small`), `STT_DEVICE` (default `cpu`), and
+`STT_COMPUTE_TYPE` (default `int8`). If microphone or speech recognition
+fails, the agent falls back to keyboard input.
+
+To use Kokoro TTS: 
+Download `kokoro-v1.0.onnx` and `voices-v1.0.bin` from `https://github.com/thewh1teagle/kokoro-onnx/releases` and place them in the `tts_soundpacks` folder. 
+
 The default model is `llama3.2`. You can choose another Ollama model:
 
 ```bash

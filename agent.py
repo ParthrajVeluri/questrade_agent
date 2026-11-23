@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import time
-import pyttsx3
 from typing import Literal, TypedDict, Optional
 from dotenv import load_dotenv
 from decimal import Decimal
@@ -14,16 +13,17 @@ from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, Field, field_validator
 
 from tools.name_to_ticker import get_ticker_from_name
+from tools.paper_order import submit_paper_order
 from helper import debug
 from tools.text_to_speech import TTS
 
 load_dotenv()
 
-
 DEBUG = os.getenv("DEBUG", "true").lower() in {"1", "true", "yes", "on"}
+STT_ENABLED = os.getenv("STT_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 
 class OrderDraft(BaseModel):
-    """Fields extracted from natural-language input."""
+    """Validated fields extracted from a user's natural-language order."""
 
     side: str | None = Field(
         default=None,
@@ -66,6 +66,8 @@ class OrderDraft(BaseModel):
 
 
 class AgentState(TypedDict, total=False):
+    """State shared between nodes in the LangGraph workflow."""
+
     command: str
     confirmed: bool
     draft: dict[str, object]
@@ -75,6 +77,8 @@ class AgentState(TypedDict, total=False):
 
 
 def build_graph():
+    """Build and compile the stateful order-processing graph."""
+
     model_name = os.getenv("OLLAMA_MODEL", "qwen3:4b-instruct-2507-q4_K_M")
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     debug(f"Building graph with model={model_name!r}, base_url={base_url!r}")
@@ -106,15 +110,6 @@ def build_graph():
 
                     TICKER RULES:
                     Convert company names into their publicly traded ticker symbols.
-
-                    Examples:
-                    - Apple = AAPL
-                    - Microsoft = MSFT
-                    - NVIDIA = NVDA
-                    - Amazon = AMZN
-                    - Tesla = TSLA
-                    - Google = GOOGL
-                    - Meta = META
 
                     IMPORTANT:
                     - If the company is clearly identifiable, return its ticker.
@@ -176,11 +171,13 @@ def build_graph():
     )
 
     def extract(state: AgentState) -> AgentState:        
+        """Extract fields, merge with incomplete prior state, and resolve tickers."""
         debug(f"[extract] command={state['command']!r}")
         debug("[extract] invoking Ollama structured output")
         draft = (prompt | extractor).invoke({"command": state["command"]})
         previous = state.get("draft")
         if previous:
+            # Preserve fields already supplied by the user in later turns.
             existing_data = OrderDraft.model_validate(previous).model_dump()
             new_data = draft.model_dump()
             for field, value in new_data.items():
@@ -191,7 +188,13 @@ def build_graph():
 
         if draft.company_name:
             debug(f"[extract] resolving company={draft.company_name!r}")
-            ticker = get_ticker_from_name(draft.company_name)
+            resolved = get_ticker_from_name.invoke({"name": draft.company_name})
+            if isinstance(resolved, (tuple, list)) and len(resolved) == 2:
+                ticker, resolved_company_name = resolved
+            else:
+                ticker, resolved_company_name = None, None
+
+            draft.company_name = resolved_company_name or draft.company_name
             if ticker:
                 draft.symbol = ticker.upper()
                 debug(f"[extract] resolved ticker={draft.symbol!r}")
@@ -203,6 +206,7 @@ def build_graph():
         return {"draft": draft.model_dump(mode="json")}
 
     def validate(state: AgentState) -> AgentState:
+        """Derive order defaults and report fields that require clarification."""
         draft = OrderDraft.model_validate(state["draft"])
         missing: list[str] = []
         
@@ -235,23 +239,26 @@ def build_graph():
         return {
             "missing": missing,
             "error": "",
+            "draft": draft.model_dump(mode="json"),
         }
 
     def clarify(state: AgentState) -> AgentState:
-            if state.get("error"):
-                response = state["error"]
-            else:
-                response = (
-                    "Please provide "
-                    + ", ".join(state["missing"])
-                    + "."
-                )
+        """Build a user-facing request for missing or invalid order fields."""
+        if state.get("error"):
+            response = state["error"]
+        else:
+            response = (
+                "Please provide "
+                + ", ".join(state["missing"])
+                + "."
+            )
 
-            debug(f"[clarify] response={response!r}")
+        debug(f"[clarify] response={response!r}")
 
-            return {"response": response}
+        return {"response": response}
 
     def confirm(state: AgentState) -> AgentState:
+        """Present an order for confirmation or allow execution to proceed."""
         draft = OrderDraft.model_validate(state["draft"])
         debug(f"[confirm] confirmed={state.get('confirmed', False)!r}")
         price = (
@@ -264,19 +271,31 @@ def build_graph():
             return {
                 "response": (
                     f"Please confirm: {draft.side} {draft.quantity} shares of "
-                    f"{draft.symbol.upper()} as a {draft.order_type} order{price}."
+                    f"{draft.company_name or draft.symbol or 'Unknown'} "
+                    f"as a {draft.order_type} order{price}."
                 )
             }
         return {}
 
     def execute(state: AgentState) -> AgentState:
+        """Submit the validated draft and reset it after execution."""
         draft = OrderDraft.model_validate(state["draft"])
         debug(f"[execute] paper order={draft.model_dump()}")
-        # Replace this node with the Questrade order API after paper-trading tests.
+        result = submit_paper_order.invoke(
+            {
+                "side": draft.side,
+                "symbol": draft.symbol,
+                "quantity": str(draft.quantity),
+                "order_type": draft.order_type,
+                "limit_price": draft.limit_price,
+            }
+        )
+        debug(f"[execute] tool result={result}")
+
         return {
             "response": (
                 f"Paper order submitted: {draft.side} {draft.quantity} shares "
-                f"of {draft.symbol.upper()}."
+                f"of {draft.company_name or draft.symbol or 'Unknown'}."
             ),
             "draft": {},
             "confirmed": False,
@@ -337,6 +356,7 @@ def process_command(
     command: str = "",
     confirmed: bool = False,
 ) -> dict:
+    """Invoke the graph for one command and return its complete state."""
 
     config = {
         "configurable": {
@@ -357,10 +377,42 @@ def process_command(
     return result
 
 
-if __name__ == "__main__":
+def get_user_input(prompt: str, listener=None) -> str:
+    """Read a command from the microphone, falling back to keyboard input."""
+    if listener is not None:
+        print(prompt)
+        try:
+            command = listener.listen_until_silence().strip()
+        except Exception as exc:
+            print(f"\nSpeech recognition unavailable: {exc}")
+            command = ""
 
+        if command:
+            return command
+
+        print("No speech was recognized.")
+
+    return input(prompt).strip()
+
+
+if __name__ == "__main__":
     graph = build_graph()
     tts = TTS()
+    voice_listener = None
+
+    if STT_ENABLED:
+        try:
+            from tools.voice_to_text import VoiceListener
+
+            voice_listener = VoiceListener(
+                model_size=os.getenv("STT_MODEL_SIZE", "small"),
+                device=os.getenv("STT_DEVICE", "cpu"),
+                compute_type=os.getenv("STT_COMPUTE_TYPE", "int8"),
+            )
+            print("Speech-to-text enabled.")
+        except Exception as exc:
+            print(f"Speech-to-text unavailable: {exc}")
+            print("Falling back to keyboard input.")
 
     config = {
         "configurable": {
@@ -369,11 +421,15 @@ if __name__ == "__main__":
     }
 
     print("\nStock Trading Agent")
-    print("Enter 'quit' or 'exit' to close the agent.\n")
+    print("Enter 'quit' or 'exit' to close the agent.")
+    print("Set STT_ENABLED=true and TTS_ENABLED=true to enable voice mode.\n")
 
     while True:
         try:
-            command = input("\nOrder command: ").strip()
+            command = get_user_input(
+                "\nOrder command: ",
+                voice_listener,
+            )
 
             if command.lower() in {"quit", "exit"}:
                 print("Closing trading agent.")
@@ -393,14 +449,15 @@ if __name__ == "__main__":
             )
 
             print("\n" + result["response"])
-            tts.windows_speak(result["response"])
+            tts.speak(result["response"])
 
             # If all fields are available, request confirmation
             if result["response"].startswith("Please confirm:"):
 
-                answer = input(
-                    "\nConfirm order? (yes/no): "
-                ).strip().lower()
+                answer = get_user_input(
+                    "\nConfirm order? (yes/no): ",
+                    voice_listener,
+                ).lower()
 
                 if answer in {"yes", "y"}:
 
@@ -410,7 +467,7 @@ if __name__ == "__main__":
                     )
 
                     print("\n" + result["response"])
-                    tts.windows_speak(result["response"])
+                    tts.speak(result["response"])
 
 
                 elif answer in {"no", "n"}:
@@ -427,12 +484,11 @@ if __name__ == "__main__":
                     )
 
                     print("\nOrder cancelled.")
-                    tts.windows_speak("Order cancelled")
+                    tts.speak("Order cancelled")
 
                 else:
                     print("\nInvalid confirmation. Please respond with 'yes' or 'no'.")
-                    tts.windows_speak("Invalid confirmation. Please respond with 'yes' or 'no'.s")
-
+                    tts.speak("Invalid confirmation. Please respond with 'yes' or 'no'.")
             debug(
                 f"[main] processing time: "
                 f"{time.time() - start:.2f} seconds"

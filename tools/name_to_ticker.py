@@ -1,15 +1,20 @@
+"""Resolve company names to Yahoo Finance equity symbols."""
+
 import yfinance as yf
 import time
-from typing import Optional
+from typing import Optional, Tuple
+from langchain_core.tools import tool
 
-def get_ticker_from_name(name: str) -> Optional[str]:
-    """
-    Get the ticker symbol for a given company name using yfinance.
+
+@tool("resolve_company_ticker")
+def get_ticker_from_name(name: str) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve a company name to an equity ticker and canonical name.
 
     Args:
-        name (str): The name of the company.
+        name: Company name or ticker to search for.
+
     Returns:
-        str: The ticker symbol of the company, or None if not found.
+        A `(ticker, company_name)` pair, or `(None, None)` when no equity is found.
     """
     
     try:
@@ -19,25 +24,27 @@ def get_ticker_from_name(name: str) -> Optional[str]:
         
         # Ensure we received valid quotes back
         if not search.quotes:
-            return None
-            
+            return None, None
         # Filter for equities to avoid accidentally returning options or mutual funds
         for quote in search.quotes:
             if quote.get('quoteType') == 'EQUITY':
                 end = time.time()
                 print(f"Search completed in {end - start:.2f} seconds.")
-                return quote.get('symbol')
+                company_name = quote.get('shortname') or quote.get('longname')
+                symbol = quote.get('symbol')
+                return symbol, company_name
                 
         # Fallback to the very first result if no specific equity filter matches
         end = time.time()
         print(f"Search completed in {end - start:.2f} seconds.")
-        return None
+        return None, None
         
     except Exception as e:
         print(f"Error searching for {name}: {e}")
-        return None
+        return None, None
 
 if __name__ == "__main__":
+    # Standalone lookup utility for quick terminal testing.
     company_name = input("Enter the company name: ")
     ticker = get_ticker_from_name(company_name)
     if ticker:
