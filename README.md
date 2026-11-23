@@ -20,6 +20,19 @@ Run the text-input prototype:
 python agent.py
 ```
 
+To use speech input and spoken answers locally:
+
+```bash
+export STT_ENABLED=true
+export TTS_ENABLED=true
+python agent.py
+```
+
+Speech recognition uses Faster Whisper. Optional settings include
+`STT_MODEL_SIZE` (default `small`), `STT_DEVICE` (default `cpu`), and
+`STT_COMPUTE_TYPE` (default `int8`). If microphone or speech recognition
+fails, the agent falls back to keyboard input.
+
 The default model is `llama3.2`. You can choose another Ollama model:
 
 ```bash

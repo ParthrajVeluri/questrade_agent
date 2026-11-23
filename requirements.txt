@@ -3,3 +3,10 @@ langchain-ollama
 langgraph
 pydantic
 yfinance
+python-dotenv
+pyttsx3
+kokoro-onnx
+sounddevice
+faster-whisper
+numpy<2
+soundfile
